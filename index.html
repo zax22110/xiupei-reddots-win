@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2026 撿紅點 - GitHub Web App</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/lucide-react@latest"></script>
+    <!-- SheetJS -->
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+        body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+        .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+    </style>
+</head>
+<body class="bg-[#f6f8fa] text-[#24292f]">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+        const { 
+            Calendar: CalendarIcon, Trophy, Plus, Minus, Trash2, 
+            ChevronLeft, ChevronRight, FileUp, FileDown, 
+            ChevronDown, AlertCircle, Database 
+        } = lucideReact;
+
+        // --- Firebase 配置 ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyAkJgwcJtWQ4F1TLEnWooWhx42esNkcDpw",
+            authDomain: "xiupei-mahjong-win.firebaseapp.com",
+            projectId: "xiupei-mahjong-win",
+            storageBucket: "xiupei-mahjong-win.firebasestorage.app",
+            messagingSenderId: "999100537674",
+            appId: "1:999100537674:web:78ef0185a6fe341caa3fb3",
+            measurementId: "G-9NDFV99B43"
+        };
+
+        // 引入 Firebase 模組 (透過 CDN)
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, collection } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = "red-dot-2026-github";
+
+        const App = () => {
+            const [user, setUser] = useState(null);
+            const [currentDate, setCurrentDate] = useState(new Date(2026, 0, 1));
+            const [selectedDate, setSelectedDate] = useState(null);
+            const [sessions, setSessions] = useState({});
+            const [view, setView] = useState('calendar'); 
+            const [leaderboardMode, setLeaderboardMode] = useState('1'); 
+            const [syncStatus, setSyncStatus] = useState('connecting');
+            const fileInputRef = useRef(null);
+
+            const [showSaveModal, setShowSaveModal] = useState(false);
+            const [pendingView, setPendingView] = useState(null);
+
+            const [editSession, setEditSession] = useState({
+                players: ["玩家A", "玩家B"],
+                rounds: Array(12).fill(null).map(() => ({}))
+            });
+
+            const monthNames = [
+                "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
+                "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"
+            ];
+
+            // Firebase 認證
+            useEffect(() => {
+                const unsubscribe = onAuthStateChanged(auth, async (u) => {
+                    if (u) {
+                        setUser(u);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                });
+                return () => unsubscribe();
+            }, []);
+
+            // Firebase 資料監聽
+            useEffect(() => {
+                if (!user) return;
+                const q = collection(db, 'artifacts', appId, 'public', 'data', 'sessions');
+                const unsubscribe = onSnapshot(q, (snapshot) => {
+                    const newSessions = {};
+                    snapshot.forEach(doc => { newSessions[doc.id] = doc.data(); });
+                    setSessions(newSessions);
+                    setSyncStatus('online');
+                }, () => setSyncStatus('error'));
+                return () => unsubscribe();
+            }, [user]);
+
+            useEffect(() => {
+                setLeaderboardMode((currentDate.getMonth() + 1).toString());
+            }, [currentDate]);
+
+            const dateKey = (date) => {
+                if (!date) return "";
+                return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+            };
+
+            const isDirty = useMemo(() => {
+                if (view !== 'session') return false;
+                const key = dateKey(selectedDate);
+                const original = sessions[key] || { players: ["玩家A", "玩家B"], rounds: Array(12).fill(null).map(() => ({})) };
+                return JSON.stringify(editSession) !== JSON.stringify(original);
+            }, [editSession, sessions, selectedDate, view]);
+
+            const handleNavigate = (newView) => {
+                if (view === 'session' && isDirty) {
+                    setPendingView(newView);
+                    setShowSaveModal(true);
+                } else {
+                    setView(newView);
+                }
+            };
+
+            const sessionTotals = useMemo(() => {
+                const res = {};
+                editSession.players.forEach(p => {
+                    const points = editSession.rounds.reduce((s, r) => s + (r[p] || 0), 0);
+                    res[p] = { points, money: points * 5 };
+                });
+                return res;
+            }, [editSession]);
+
+            const calculateLeaderboard = useMemo(() => {
+                const totals = {};
+                const filterPrefix = leaderboardMode === 'year' ? `2026` : `2026-${String(leaderboardMode).padStart(2, '0')}`;
+                Object.entries(sessions).forEach(([dateStr, session]) => {
+                    if (dateStr.startsWith(filterPrefix) && session.players && session.rounds) {
+                        session.players.forEach(p => {
+                            if (!totals[p]) totals[p] = { points: 0, sessions: 0 };
+                            let hasPlayed = false;
+                            session.rounds.forEach(r => { if (r[p] !== undefined && r[p] !== null) { totals[p].points += r[p]; hasPlayed = true; } });
+                            if (hasPlayed) totals[p].sessions += 1;
+                        });
+                    }
+                });
+                return Object.entries(totals).map(([name, stats]) => ({ name, points: stats.points, sessions: stats.sessions, money: stats.points * 5 })).sort((a, b) => b.points - a.points);
+            }, [sessions, leaderboardMode]);
+
+            const saveSession = async () => {
+                if (!user) return;
+                try { 
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'sessions', dateKey(selectedDate)), editSession); 
+                    if (pendingView) { setView(pendingView); setPendingView(null); setShowSaveModal(false); } 
+                    else { setView('calendar'); }
+                } catch (err) { setSyncStatus('error'); }
+            };
+
+            const discardChanges = () => {
+                setView(pendingView);
+                setPendingView(null);
+                setShowSaveModal(false);
+            };
+
+            const exportToExcel = () => {
+                if (!window.XLSX) return;
+                const rows = [];
+                rows.push(["金額", ...editSession.players.map(p => sessionTotals[p].money), "驗算"]);
+                rows.push(["分數", ...editSession.players.map(p => sessionTotals[p].points), editSession.players.reduce((s, p) => s + sessionTotals[p].points, 0)]);
+                rows.push(["玩家", ...editSession.players, "驗算"]);
+                editSession.rounds.forEach((round, idx) => {
+                    const sum = editSession.players.reduce((s, p) => s + (round[p] || 0), 0);
+                    rows.push([idx + 1, ...editSession.players.map(p => round[p] || 0), sum]);
+                });
+                const worksheet = XLSX.utils.aoa_to_sheet(rows);
+                const workbook = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(workbook, worksheet, "紀錄");
+                XLSX.writeFile(workbook, `紅點_${dateKey(selectedDate)}.xlsx`);
+            };
+
+            const importFromExcel = (e) => {
+                const file = e.target.files[0];
+                if (!file || !window.XLSX) return;
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const data = XLSX.utils.sheet_to_json(XLSX.read(event.target.result, { type: 'binary' }).Sheets[XLSX.read(event.target.result, { type: 'binary' }).SheetNames[0]], { header: 1 });
+                    if (data.length >= 3) {
+                        const playerRow = data[2];
+                        const validMap = [];
+                        playerRow.forEach((name, idx) => { if (idx > 0 && name && !String(name).includes("驗算")) validMap.push({ name: String(name), colIndex: idx }); });
+                        const newRounds = data.slice(3).filter(row => row && row[0] !== null && !isNaN(parseInt(row[0]))).map(row => {
+                            const rd = {}; validMap.forEach(p => { rd[p.name] = parseInt(row[p.colIndex]) || 0; });
+                            return rd;
+                        });
+                        setEditSession({ players: validMap.map(v => v.name), rounds: newRounds });
+                    }
+                };
+                reader.readAsBinaryString(file);
+            };
+
+            const openSession = (day) => {
+                const fullDate = new Date(2026, currentDate.getMonth(), day);
+                setSelectedDate(fullDate);
+                setEditSession(sessions[dateKey(fullDate)] || { players: ["玩家A", "玩家B"], rounds: Array(12).fill(null).map(() => ({})) });
+                setView('session');
+            };
+
+            const renderCalendar = () => {
+                const month = currentDate.getMonth();
+                const daysInMonth = new Date(2026, month + 1, 0).getDate();
+                const startDay = new Date(2026, month, 1).getDay();
+                const days = [];
+                for (let i = 0; i < startDay; i++) days.push(<div key={`e-${i}`}></div>);
+                for (let d = 1; d <= daysInMonth; d++) {
+                    const hasData = sessions[dateKey(new Date(2026, month, d))];
+                    days.push(
+                        <button key={d} onClick={() => openSession(d)} className={`aspect-square w-full border border-[#d0d7de] rounded-md flex flex-col items-center justify-center relative bg-white hover:bg-[#f3f4f6] transition-colors active:bg-[#ebecf0] shadow-sm ${hasData ? 'ring-2 ring-[#0969da] border-[#0969da]' : ''}`}>
+                            <span className="text-base font-bold text-[#24292f]">{d}</span>
+                            {hasData && <div className="absolute bottom-2 w-1.5 h-1.5 rounded-full bg-[#57606a]"></div>}
+                        </button>
+                    );
+                }
+                return (
+                    <div className="p-4 max-w-lg mx-auto">
+                        <div className="flex items-center justify-between mb-8 px-2">
+                            <button onClick={() => setCurrentDate(new Date(2026, month - 1, 1))} className="p-2 border border-[#d0d7de] rounded-md bg-white hover:bg-[#f6f8fa]"><ChevronLeft size={20}/></button>
+                            <p className="text-xl font-bold text-[#8c959f] uppercase tracking-widest">{monthNames[month]}</p>
+                            <button onClick={() => setCurrentDate(new Date(2026, month + 1, 1))} className="p-2 border border-[#d0d7de] rounded-md bg-white hover:bg-[#f6f8fa]"><ChevronRight size={20}/></button>
+                        </div>
+                        <div className="grid grid-cols-7 gap-2">
+                            {['SUN','MON','TUE','WED','THU','FRI','SAT'].map(d => <div key={d} className="text-center text-[10px] font-bold text-[#8c959f] pb-2 uppercase">{d}</div>)}
+                            {days}
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderLeaderboard = () => {
+                const board = calculateLeaderboard;
+                return (
+                    <div className="p-6 max-w-md mx-auto">
+                        <div className="flex items-center gap-2 mb-6 border-b border-[#d0d7de] pb-4">
+                            <Trophy className="text-[#afb8c1]" size={24}/><h2 className="text-xl font-bold">戰績排行統計</h2>
+                        </div>
+                        <div className="relative mb-6">
+                            <select value={leaderboardMode} onChange={(e) => setLeaderboardMode(e.target.value)} className="w-full bg-[#f6f8fa] border border-[#d0d7de] rounded-md px-4 py-2 appearance-none font-bold text-sm outline-none cursor-pointer shadow-sm">
+                                <option value="year">2026 年度累計</option>
+                                {Array.from({length: 12}, (_, i) => (<option key={i+1} value={(i+1).toString()}>2026 年 {i+1} 月</option>))}
+                            </select>
+                            <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none text-[#57606a]" size={16} />
+                        </div>
+                        <div className="border border-[#d0d7de] rounded-md overflow-hidden bg-white shadow-sm">
+                            {board.length === 0 ? <div className="text-center py-10 text-[#8c959f] text-sm font-medium">尚無相關紀錄</div> : board.map((p, i) => (
+                                <div key={i} className={`p-4 flex items-center justify-between ${i !== board.length - 1 ? 'border-b border-[#d0d7de]' : ''} hover:bg-[#f6f8fa] transition-colors`}>
+                                    <div className="flex items-center gap-4">
+                                        <span className="text-sm font-bold text-[#8c959f] w-4">{i + 1}</span>
+                                        <div><div className="font-bold text-sm">{p.name}</div><div className="text-[11px] text-[#57606a] font-medium uppercase">{p.points} Pts · {p.sessions} Games</div></div>
+                                    </div>
+                                    <div className={`font-mono font-bold text-base ${p.money >= 0 ? 'text-[#1a7f37]' : 'text-[#cf222e]'}`}>{p.money >= 0 ? `+$${p.money}` : `-$${Math.abs(p.money)}`}</div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                );
+            };
+
+            const renderSessionEdit = () => (
+                <div className="p-4 max-w-xl mx-auto pb-32">
+                    <div className="flex items-center justify-between mb-6">
+                        <button onClick={() => handleNavigate('calendar')} className="flex items-center gap-1 text-sm font-bold text-[#0969da] hover:underline"><ChevronLeft size={16}/> Back</button>
+                        <div className="text-center"><h2 className="text-base font-bold text-[#24292f]">{dateKey(selectedDate)}</h2><span className="text-[10px] text-[#57606a] border border-[#d0d7de] px-1.5 py-0.5 rounded-full font-bold">SESSION DATA</span></div>
+                        <button onClick={saveSession} className="bg-[#2da44e] hover:bg-[#2c974b] text-white px-4 py-1.5 rounded-md text-sm font-bold shadow-sm transition-colors">儲存變更</button>
+                    </div>
+                    <div className="border border-[#d0d7de] rounded-md bg-white mb-6 overflow-hidden shadow-sm">
+                        <div className="bg-[#f6f8fa] border-b border-[#d0d7de] px-4 py-2 flex justify-between items-center"><h3 className="text-xs font-bold text-[#24292f]">PLAYERS</h3><button onClick={() => editSession.players.length < 5 && setEditSession({...editSession, players: [...editSession.players, `玩家${String.fromCharCode(65 + editSession.players.length)}` ]})} className="text-[10px] text-[#0969da] font-bold hover:underline">+ Add Player</button></div>
+                        <div className="p-4 flex flex-wrap gap-2">
+                            {editSession.players.map((p, i) => (
+                                <div key={i} className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-[#f6f8fa] border border-[#d0d7de] text-xs font-bold"><input value={p} onChange={(e) => { const newP = [...editSession.players]; newP[i] = e.target.value; setEditSession({...editSession, players: newP}); }} className="bg-transparent border-none w-16 focus:ring-0 p-0" /><button onClick={() => editSession.players.length > 2 && setEditSession({...editSession, players: editSession.players.filter((_, idx) => idx !== i)})} className="text-[#8c959f] hover:text-[#cf222e]"><Trash2 size={14}/></button></div>
+                            ))}
+                        </div>
+                    </div>
+                    <div className="border border-[#d0d7de] rounded-md bg-white overflow-hidden mb-6 shadow-sm">
+                        <table className="w-full text-center border-collapse">
+                            <thead><tr className="bg-[#f6f8fa] border-b border-[#d0d7de] text-[10px] font-bold text-[#57606a]"><th className="py-2">ROUND</th>{editSession.players.map((p, i) => (<th key={i} className="py-2"><div className="truncate max-w-[60px] mx-auto">{p}</div><div className={`mt-0.5 ${sessionTotals[p].money >= 0 ? 'text-[#1a7f37]' : 'text-[#cf222e]'}`}>{sessionTotals[p].money >= 0 ? `+${sessionTotals[p].money}` : `-${Math.abs(sessionTotals[p].money)}`}</div></th>))}<th className="py-2">VALID</th></tr></thead>
+                            <tbody className="divide-y divide-[#d0d7de]">{editSession.rounds.map((round, rIdx) => { const sum = editSession.players.reduce((s, p) => s + (round[p] || 0), 0); const hasVal = editSession.players.some(p => round[p] !== undefined && round[p] !== null); return (<tr key={rIdx} className="hover:bg-[#f6f8fa] transition-colors"><td className="py-3 text-[11px] font-bold text-[#8c959f]">R{rIdx + 1}</td>{editSession.players.map((pName, pIdx) => (<td key={pIdx} className="p-1"><input type="number" value={round[pName] ?? ""} onChange={(e) => { const newR = [...editSession.rounds]; newR[rIdx] = { ...newR[rIdx], [pName]: e.target.value === "" ? null : parseInt(e.target.value) }; setEditSession({...editSession, rounds: newR}); }} className="w-full border border-[#d0d7de] rounded-md p-2 text-center text-xs font-bold outline-none" placeholder="0" /></td>))}<td className={`text-[10px] font-bold ${hasVal ? (sum === 0 ? 'text-[#1a7f37]' : 'text-[#cf222e]') : 'text-transparent'}`}>{hasVal ? (sum === 0 ? "✓" : sum) : "-"}</td></tr>);})}</tbody>
+                        </table>
+                        <div className="bg-[#f6f8fa] p-3 flex justify-center gap-10 border-t border-[#d0d7de]"><button onClick={() => editSession.rounds.length > 1 && setEditSession(p => ({...p, rounds: p.rounds.slice(0, -1)}))} className="text-[#57606a] hover:text-[#cf222e]"><Minus size={18}/></button><span className="text-xs font-bold text-[#8c959f]">TOTAL {editSession.rounds.length} ROUNDS</span><button onClick={() => setEditSession(p => ({...p, rounds: [...p.rounds, {}]}))} className="text-[#57606a] hover:text-[#1a7f37]"><Plus size={18}/></button></div>
+                    </div>
+                    <div className="flex justify-center gap-6 border-t border-[#d0d7de] pt-6 mb-10"><button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 text-xs font-bold text-[#57606a] border border-[#d0d7de] px-4 py-2 rounded-md bg-white hover:bg-[#f6f8fa]"><FileUp size={14} /> Import Excel</button><button onClick={exportToExcel} className="flex items-center gap-1.5 text-xs font-bold text-[#57606a] border border-[#d0d7de] px-4 py-2 rounded-md bg-white hover:bg-[#f6f8fa]"><FileDown size={14} /> Export Excel</button><input type="file" ref={fileInputRef} onChange={importFromExcel} className="hidden" accept=".xlsx, .xls" /></div>
+                </div>
+            );
+
+            return (
+                <div className="flex flex-col min-h-screen bg-[#f6f8fa] text-[#24292f] overflow-x-hidden">
+                    <header className="bg-[#24292f] text-white py-8 shadow-lg">
+                        <div className="max-w-lg mx-auto flex items-center justify-center gap-3"><Database size={32} className="text-[#8c959f]"/><h1 className="text-3xl font-bold tracking-tight">2026 撿紅點</h1></div>
+                        <div className="flex items-center justify-center gap-2 mt-4"><div className={`w-2 h-2 rounded-full ${syncStatus === 'online' ? 'bg-[#3fb950]' : 'bg-[#f85149]'} animate-pulse`}></div><span className="text-[10px] font-bold text-[#8c959f] uppercase tracking-widest">{syncStatus === 'online' ? 'Live Cloud Sync' : 'Offline Mode'}</span></div>
+                    </header>
+
+                    <main className="flex-grow max-w-lg mx-auto w-full pt-6 pb-40 px-4">
+                        {view === 'calendar' && renderCalendar()}
+                        {view === 'session' && renderSessionEdit()}
+                        {view === 'leaderboard' && renderLeaderboard()}
+                    </main>
+
+                    {showSaveModal && (
+                        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-[#24292f]/50 backdrop-blur-sm"><div className="bg-white border border-[#d0d7de] rounded-md p-8 max-w-xs w-full shadow-2xl"><div className="flex items-center gap-2 mb-4 text-[#9a6700]"><AlertCircle size={24}/><h3 className="text-lg font-bold">尚未儲存內容</h3></div><p className="text-sm text-[#57606a] mb-8 font-medium">您的編輯數據尚未存檔，直接離開將會遺失。</p><div className="flex flex-col gap-3"><button onClick={saveSession} className="w-full bg-[#2da44e] text-white py-3 rounded-md font-bold text-sm">儲存並離開</button><button onClick={discardChanges} className="w-full bg-white border border-[#d0d7de] text-[#cf222e] py-3 rounded-md font-bold text-sm hover:bg-[#fff1f0]">不儲存直接離開</button><button onClick={() => setShowSaveModal(false)} className="w-full py-2 text-xs font-bold text-[#57606a] hover:underline">返回繼續編輯</button></div></div></div>
+                    )}
+
+                    <footer className="fixed bottom-10 left-0 right-0 z-50 flex justify-center pointer-events-none px-4">
+                        <nav className="bg-white border border-[#d0d7de] p-1 rounded-md shadow-2xl flex items-center pointer-events-auto ring-1 ring-black/5">
+                            <button onClick={() => handleNavigate('calendar')} className={`flex items-center gap-2 px-8 py-3 rounded-md text-xs font-bold transition-all ${view === 'calendar' || view === 'session' ? 'bg-[#0969da] text-white shadow-md' : 'text-[#57606a] hover:bg-[#f6f8fa]'}`}><CalendarIcon size={18}/><span>CALENDAR</span></button>
+                            <div className="w-px h-6 bg-[#d0d7de] mx-1"></div>
+                            <button onClick={() => handleNavigate('leaderboard')} className={`flex items-center gap-2 px-8 py-3 rounded-md text-xs font-bold transition-all ${view === 'leaderboard' ? 'bg-[#0969da] text-white shadow-md' : 'text-[#57606a] hover:bg-[#f6f8fa]'}`}><Trophy size={18}/><span>RANKING</span></button>
+                        </nav>
+                    </footer>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
